@@ -26,14 +26,8 @@ def readUInt32LE(bytes):
         print "Wrong number of bytes (" + str(len(bytes)) + ") should be 4"
         return None
     data = int(bytes[:2].encode('hex'), 16)
-    data += (int(bytes[2:].encode('hex'), 16) * 10)
+    data += (int(bytes[2:].encode('hex'), 16) * 10) # * 10
     return data
-
-def readBytesToDecimal(bytes):
-    decimal = 0
-    for idx, byte in enumerate(bytes):
-        decimal += (int(byte.encode('hex'), 16) * idx * 10)
-    return decimal
 
 def readUInt8(bytes):
     if len(bytes) != 1:
@@ -69,11 +63,27 @@ commands_dict = {'00': "  model / version read ",
                  '0a': "get face detection angle"
                  }
 
+response_codes_dict = {'00': "OK",
+                       'ff': "UNDEFINED COMMAND",
+                       'fe': "INTERNAL ERROR",
+                       'FD': "ILLEGAL COMMAND",
+                       'fa': "COMMUNICATION ERROR",
+                       'fb': "COMMUNICATION ERROR",
+                       'fc': "COMMUNICATION ERROR",
+                       'f0': "DEVICE ERROR",
+                       'f1': "DEVICE ERROR",
+                       'f2': "DEVICE ERROR",
+                       'f3': "DEVICE ERROR",
+                       'f4': "DEVICE ERROR",
+                       'f5': "DEVICE ERROR",
+                       'f6': "DEVICE ERROR",
+                       'f7': "DEVICE ERROR",
+                       'f8': "DEVICE ERROR",
+                       'f9': "DEVICE ERROR"
+                       }
+
 def print_datagram_send(command):
     print RED + "===========>"
-    print "command len: " + str(len(command))
-    print "command command[2:3]: '" + str(command[2:3].encode('hex')) + "'"
-
     print "Sending datagram:"
     print "header     command_code       data_len  payload"
     encoded = command.encode('hex')
@@ -105,10 +115,18 @@ def print_datagram_read(header, data_len, response_code, payload):
         r = response_code.encode('hex')
     if payload:
         p = payload.encode('hex')
+        try:
+            payload_encoded_unicode = unicode(payload)#payload.encode('unicode')
+        except UnicodeDecodeError:
+            payload_encoded_unicode = "[ can't encode in unicode ]"
+
+    else:
+        p = "None"
+        payload_encoded_unicode = "None"
 
     print ("  " + h + "     " + d + "         " + r + "       " + p)
-    print ("        (" + str(readUInt32LE(data_len)) + " bytes)       "
-           + (" OK" if response_code == '\x00' else "ERROR") + "       '" + payload.encode('utf-8') + "'")
+    print ("        (" + str(readUInt32LE(data_len)) + " bytes)     " + " " * (5 - len(str(readUInt32LE(data_len))))
+           + (response_codes_dict.get(r, "UNKNOWN_CODE")) + "       '" + payload_encoded_unicode + "'")
     print "<=========================" + ENDC
 
 class HvcP(object):
@@ -189,7 +207,8 @@ class HvcP(object):
                         data_bytes_to_read = data_len
                         if size is not None:
                             data_bytes_to_read = size
-                        print "Reading " + str(data_bytes_to_read) + " bytes as payload"
+                            print "Forcing to read " + str(data_bytes_to_read) + " bytes instead of " + str(data_len)
+                        #print "Reading " + str(data_bytes_to_read) + " bytes as payload"
                         payload_bytes = self.read(data_bytes_to_read)
 
         print_datagram_read(response_header_bytes, data_len_bytes, response_code_bytes, payload_bytes)
@@ -239,14 +258,10 @@ class HvcP(object):
         elif angle == 270:
             angle_code = '03'
 
-        #buf  = '\xfe'
-        buf = 'fe'
-        #buf += '\x01' # Command #1, set camera orientation
-        buf += '01'
-        #buf += writeUInt16LE(1) # data len
-        buf += '0100'
-        #buf += writeUInt8(angle_code)
-        buf += angle_code
+        buf = 'fe' # sync header
+        buf += '01' # command
+        buf += '0100' # data len
+        buf += angle_code # payload
         self.send_command(buf)
         # The datasheet says it should give back info about how it went
         # but in my case it does not work
@@ -257,11 +272,15 @@ class HvcP(object):
         :return: 0, 90, 180, 270 as degrees of orientation
         """
         self.send_command('fe020000')
-        # Hangs when reading the byte where the position is stored :/
-        response_code, data = self.read_data(1)
-        print "get_camera_orientation resp code and data:"
-        print response_code
-        print data
+# Does not return the camera orientation, there is no data_len and no payload
+# <=========================
+# Read datagram:
+# header   data_len   response_code  payload
+#   fe     00000000         00       None
+#         (0 bytes)        OK       'None'
+# <=========================
+# Getting camera orientation: None
+        response_code, data = self.read_data()
 
         if data == '\x00':
             return 0
@@ -271,6 +290,7 @@ class HvcP(object):
             return 180
         elif data == '\x03':
             return 270
+        return None
 
     def detection_execution(self):
         """
@@ -282,14 +302,45 @@ class HvcP(object):
 
     def thresholds_read(self):
         """
-        Reads the thresholds set
+        Reads the thresholds set for human body, hand and face detectors
+        {'human_body': 254, 'face': 254, 'reserved': 254, 'hand': 254}
         :return:
         """
         self.send_command('fe060000')
         response_code, data = self.read_data()
-        print "threshold_read response_code and data:"
-        print response_code
-        print data
+        thresholds_dict = {}
+        thresholds_dict["human_body"] = readUInt16LE(data[0:2])
+        thresholds_dict["hand"]       = readUInt16LE(data[2:4])
+        thresholds_dict["face"]       = readUInt16LE(data[4:6])
+        thresholds_dict["reserved"]   = readUInt16LE(data[6:8])
+        return thresholds_dict
+
+
+    def detection_size_read(self):
+        """
+        Get the detection size configurations (max and min): human_body size,
+        hand size and face size:
+        {'human_body_min': 30, 'hand_min': 40, 'hand_max': 320, 'face_min': 64, 'face_max': 320, 'human_body_max': 320}
+        :return: dict
+        """
+        self.send_command('fe080000')
+        response_code, data = self.read_data()
+        detection_size_dict = {}
+        detection_size_dict["human_body_min"] = readUInt16LE(data[0:2])
+        detection_size_dict["human_body_max"] = readUInt16LE(data[2:4])
+        detection_size_dict["hand_min"]       = readUInt16LE(data[4:6])
+        detection_size_dict["hand_max"]       = readUInt16LE(data[6:8])
+        detection_size_dict["face_min"]       = readUInt16LE(data[8:10])
+        detection_size_dict["face_max"]       = readUInt16LE(data[10:12])
+        return detection_size_dict
+
+    def face_detection_angle_read(self):
+        """
+        :return:
+        """
+        self.send_command('fe0a0000')
+        response_code, data = self.read_data()
+
 
     def test_requests(self, num_of_codes_to_try=10):
         for i in range(num_of_codes_to_try):
@@ -324,16 +375,31 @@ if __name__ == '__main__':
     sensor = HvcP()
     print "Getting version:"
     print sensor.get_version()
+    print "\n\n"
 
+    deg_to_set_camera = 0
+    print "Setting camera orientation to " + str(deg_to_set_camera) + " deg"
+    sensor.set_camera_orientation(deg_to_set_camera)
+    print "Getting camera orientation: " + str(sensor.get_camera_orientation())
+    deg_to_set_camera = 90
+    print "Setting camera orientation to " + str(deg_to_set_camera) + " deg"
+    sensor.set_camera_orientation(deg_to_set_camera)
+    print "Getting camera orientation: " + str(sensor.get_camera_orientation())
     deg_to_set_camera = 180
     print "Setting camera orientation to " + str(deg_to_set_camera) + " deg"
     sensor.set_camera_orientation(deg_to_set_camera)
-    # Not working, not following datasheet specification
-    # print "Getting camera orientation:"
-    # print sensor.get_camera_orientation()
+    print "Getting camera orientation: " + str(sensor.get_camera_orientation())
+    deg_to_set_camera = 270
+    print "Setting camera orientation to " + str(deg_to_set_camera) + " deg"
+    sensor.set_camera_orientation(deg_to_set_camera)
+    print "Getting camera orientation: " + str(sensor.get_camera_orientation())
+    print "\n\n"
 
-    print "Reading thresholds"
-    print sensor.thresholds_read()
+    print "Reading thresholds settings: " + str(sensor.thresholds_read())
+    print "\n\n"
+
+    print "Reading detection size settings: " + str(sensor.detection_size_read())
+    print "\n\n"
 
     exit(0)
     print "Testing requests:"
