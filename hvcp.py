@@ -27,6 +27,9 @@ def readUInt32LE(bytes):
         return None
     data = int(bytes[:2].encode('hex'), 16)
     data += (int(bytes[2:].encode('hex'), 16) * 10) # * 10
+
+
+    data, = struct.unpack("<I", bytes)
     return data
 
 def readUInt8(bytes):
@@ -66,7 +69,7 @@ commands_dict = {'00': "  model / version read ",
 response_codes_dict = {'00': "OK",
                        'ff': "UNDEFINED COMMAND",
                        'fe': "INTERNAL ERROR",
-                       'FD': "ILLEGAL COMMAND",
+                       'fd': "ILLEGAL COMMAND",
                        'fa': "COMMUNICATION ERROR",
                        'fb': "COMMUNICATION ERROR",
                        'fc': "COMMUNICATION ERROR",
@@ -101,32 +104,41 @@ def print_datagram_send(command):
 def print_datagram_read(header, data_len, response_code, payload):
     print GREEN + "<========================="
     print "Read datagram:"
-    print "header   data_len   response_code  payload"
+    print "header   response_code     data_len     payload"
     if header:
         h = header.encode('hex')
     else:
-        print " None      None         None         None"
+        print "  None      None         None         None"
         print "<=========================" + ENDC
         return
 
-    if data_len:
-        d = data_len.encode('hex')
     if response_code:
         r = response_code.encode('hex')
+
+    if data_len:
+        d = data_len.encode('hex')
+        data_len_bytes = readUInt32LE(data_len)
+    else:
+        print "  " + h + "      " + r + "   None         None"
+        print "       " + response_codes_dict.get(r, "UNKNOWN_CODE")
+        print "<=========================" + ENDC
+        return
+
     if payload:
         p = payload.encode('hex')
         try:
             payload_encoded_unicode = unicode(payload)#payload.encode('unicode')
         except UnicodeDecodeError:
             payload_encoded_unicode = "[ can't encode in unicode ]"
-
     else:
         p = "None"
         payload_encoded_unicode = "None"
 
-    print ("  " + h + "     " + d + "         " + r + "       " + p)
-    print ("        (" + str(readUInt32LE(data_len)) + " bytes)     " + " " * (5 - len(str(readUInt32LE(data_len))))
-           + (response_codes_dict.get(r, "UNKNOWN_CODE")) + "       '" + payload_encoded_unicode + "'")
+    print ("  " + h + "          " + r + "           " + d + "     " + p)
+    print ("              " + (response_codes_dict.get(r, "UNKNOWN_CODE")) + "           (" +
+           str(data_len_bytes) + " bytes)   '" + payload_encoded_unicode + "'" )
+    # print ("        (" + str(data_len_bytes) + " bytes)     "
+    #        +  + "       '" + payload_encoded_unicode + "'")
     print "<=========================" + ENDC
 
 class HvcP(object):
@@ -193,23 +205,28 @@ class HvcP(object):
                 print "Error: Invalid response header, clearing input"
                 self.clear_input()
             else:
-                # Check data len, Little Endian Unsigned Int 32bits (4 bytes)
-                data_len_bytes = self.read(4)
-                if data_len_bytes:
-                    data_len = readUInt32LE(data_len_bytes)
-                    # total length = header + data_length_header + response_code + data_len
-                    response_len = 1 + 4 + 1 + data_len
-                    response_code_bytes = self.read(1)
-                    if response_code_bytes:
-                        response_code = readUInt8(response_code_bytes)
+                response_code_bytes = self.read(1)
+                if response_code_bytes:
+                    response_code = readUInt8(response_code_bytes)
+                    if response_code_bytes == '\x00': # If all is OK
+                        # Check data len, Little Endian Unsigned Int 32bits (4 bytes)
+                        data_len_bytes = self.read(4)
+                        if data_len_bytes:
+                            data_len = readUInt32LE(data_len_bytes)
+                            # total length = header + data_length_header + response_code + data_len
+                            response_len = 1 + 4 + 1 + data_len
+                            # Set the bytes to read as payload, contemplate the forced case
+                            data_bytes_to_read = data_len
+                            if size is not None:
+                                data_bytes_to_read = size
+                                print "Forcing to read " + str(data_bytes_to_read) + " bytes instead of " + str(data_len)
+                            #print "Reading " + str(data_bytes_to_read) + " bytes as payload"
+                            payload_bytes = self.read(data_bytes_to_read)
+                    else:
+                        print "Response code not OK, cleaning buffer"
+                        # Read zeros
+                        zeros = self.read(4)
 
-                        # Set the bytes to read as payload, contemplate the forced case
-                        data_bytes_to_read = data_len
-                        if size is not None:
-                            data_bytes_to_read = size
-                            print "Forcing to read " + str(data_bytes_to_read) + " bytes instead of " + str(data_len)
-                        #print "Reading " + str(data_bytes_to_read) + " bytes as payload"
-                        payload_bytes = self.read(data_bytes_to_read)
 
         print_datagram_read(response_header_bytes, data_len_bytes, response_code_bytes, payload_bytes)
         return response_code, payload_bytes
@@ -263,6 +280,7 @@ class HvcP(object):
         buf += '0100' # data len
         buf += angle_code # payload
         self.send_command(buf)
+        response_code, data = self.read_data()
         # The datasheet says it should give back info about how it went
         # but in my case it does not work
 
@@ -270,16 +288,9 @@ class HvcP(object):
         """
         Get the camera mounting orientation
         :return: 0, 90, 180, 270 as degrees of orientation
+        and the config setting
         """
         self.send_command('fe020000')
-# Does not return the camera orientation, there is no data_len and no payload
-# <=========================
-# Read datagram:
-# header   data_len   response_code  payload
-#   fe     00000000         00       None
-#         (0 bytes)        OK       'None'
-# <=========================
-# Getting camera orientation: None
         response_code, data = self.read_data()
 
         if data == '\x00':
@@ -290,15 +301,33 @@ class HvcP(object):
             return 180
         elif data == '\x03':
             return 270
-        return None
+        return None, None
 
     def detection_execution(self):
         """
         Sets the detection to execute once
         :return:
         """
-        self.send_command('fe030300')
+        command = 'fe030300'
+        # 2 bytes: things to run
+        # 1 byte: reserved
+        # The bytes are configured by bits, byte_config_1:
+        # byte 7 6 5 4 3 2 1 0
+        # eye_closed, line_of_sight, sex, age, face_orientation, face_detection, hand_detection, human_body_detection
+        # byte_config_2:
+        # 0, 0, 0, 0, 0, 0, 0, facial_expression [all 0's but the last]
+        # byte_config_3:
+        # 0, 0, 0, 0, 0, 0, 0, 0 [Fixed 0's]
 
+        # 04 = face_detection
+        byte_config_1 = '04'
+        byte_config_2 = '00'
+        byte_config_3 = '00'
+        command = command + byte_config_1 + byte_config_2 + byte_config_3
+        self.send_command(command)
+        response_code, data = self.read_data()
+        if data is not None:
+            print "detection execution data: " + str(data.encode('hex'))
 
     def thresholds_read(self):
         """
@@ -336,10 +365,31 @@ class HvcP(object):
 
     def face_detection_angle_read(self):
         """
+        Face orientation left and right, face is the configuration of the slope (each 1 byte)
+        whatever that means.
+        {'face_inclination': '+-15', 'face_direction': 'front_face (+-30)'}
         :return:
         """
         self.send_command('fe0a0000')
         response_code, data = self.read_data()
+        face_angle_dict = {}
+        if data[:1] == '\x00':
+            face_angle_dict["face_direction"] = "front_face (+-30)"
+        elif data[:1] == '\x01':
+            face_angle_dict["face_direction"] = "diagonal_face (+-60)"
+        elif data[:1] == '\x02':
+            face_angle_dict["face_direction"] = "profile_face (+-90)"
+        else:
+            face_angle_dict["face_direction"] = "unknown_setting (" + data[:1].encode('hex') + ")"
+
+        if data[1:2] == '\x00':
+            face_angle_dict["face_inclination"] = "+-15"
+        elif data[1:2] == '\x01':
+            face_angle_dict["face_inclination"] = "+-45"
+        else:
+            face_angle_dict["face_inclination"] = "unknown_setting (" + data[1:2].encode('hex') + ")"
+
+        return face_angle_dict
 
 
     def test_requests(self, num_of_codes_to_try=10):
@@ -349,26 +399,13 @@ class HvcP(object):
             if len(i_str_hex_enconded) == 1:
                 i_str_hex_enconded = '0' + i_str_hex_enconded
             command = 'fe' + i_str_hex_enconded + '0000'
-            print "\n\n====================================="
+            print "\n\n~~~~~~~~~~~~~~~~~"
             print "Command # " + str(i)
             print "Sending command: '" + command + "'"
             self.send_command(command)
             print "Command sent, reading data:"
             response_code, data = self.read_data()
-            print "response code:"
-            print response_code
-            if data:
-                if len(data) > 0:
-                    print "data:"
-                    print data
-                    print "data as hex:"
-                    try:
-                        print data.encode('hex')
-                    except AttributeError:
-                        print "NOT ENCODABLE AS HEX"
-                else:
-                    print "data len == 0, we probably couldnt read"
-            print "=====================================\n\n"
+            print "~~~~~~~~~~~~~~~~~~~~\n\n"
 
 
 if __name__ == '__main__':
@@ -401,343 +438,11 @@ if __name__ == '__main__':
     print "Reading detection size settings: " + str(sensor.detection_size_read())
     print "\n\n"
 
-    exit(0)
+    print "Reading face angle settings: " + str(sensor.face_detection_angle_read())
+    print "\n\n"
+
+    print "Detection execution: " + str(sensor.detection_execution())
+    print "\n\n"
+
     print "Testing requests:"
     sensor.test_requests()
-
-# HvcP.prototype.parseBodyData = function(size, data) {
-# 	var result = [];
-#
-# 	for (var i = 0; i < size; ++i) {
-# 		var d = data.slice(i * 8, i * 8 + 8);
-# 		var r = {};
-# 		r.x          = d.readUInt16LE(0);
-# 		r.y          = d.readUInt16LE(2);
-# 		r.size       = d.readUInt16LE(4);
-# 		r.confidence = d.readUInt16LE(6);
-#
-# 		result.push(r);
-# 	}
-# 	return result;
-# }
-#
-# HvcP.prototype.parseHandData = function(size, data) {
-# 	var result = [];
-#
-# 	for (var i = 0; i < size; ++i) {
-# 		var d = data.slice(i * 8, i * 8 + 8);
-# 		var r = {};
-# 		r.x          = d.readUInt16LE(0);
-# 		r.y          = d.readUInt16LE(2);
-# 		r.size       = d.readUInt16LE(4);
-# 		r.confidence = d.readUInt16LE(6);
-#
-# 		result.push(r);
-# 	}
-# 	return result;
-# }
-#
-# HvcP.prototype.parseFaceData = function(size, data) {
-# 	var result = [];
-#
-# 	for (var i = 0; i < size; ++i) {
-# 		var d = data.slice(i * 38, i * 38 + 38);
-#
-# 		var r = {};
-# 		r.x              = d.readInt16LE(0);
-# 		r.y              = d.readInt16LE(2);
-# 		r.size           = d.readInt16LE(4);
-# 		r.confidence     = d.readUInt16LE(6);
-#
-# 		r.dir = {};
-# 		r.dir.yaw        = d.readInt16LE(8);
-# 		r.dir.pitch      = d.readInt16LE(10);
-# 		r.dir.roll       = d.readInt16LE(12);
-# 		r.dir.confidence = d.readUInt16LE(14);
-#
-# 		r.age = {};
-# 		r.age.age        = d.readInt8(16);
-# 		r.age.confidence = d.readUInt16LE(17);
-#
-# 		r.gen = {};
-# 		var gen = d.readInt8(19);
-# 		switch(gen) {
-# 		case 0:
-# 			r.gen.gender = 'female';
-# 			break;
-# 		case 1:
-# 			r.gen.gender = 'male';
-# 			break;
-# 		default:
-# 			r.gen.gender = 'unknown';
-# 		}
-# 		r.gen.confidence = d.readUInt16LE(20);
-#
-# 		r.gaze = {};
-# 		r.gaze.gazeLR    = d.readInt8(22);
-# 		r.gaze.gazeUD    = d.readInt8(23);
-#
-# 		r.blink = {};
-# 		r.blink.ratioL   = d.readInt16LE(24);
-# 		r.blink.ratioR   = d.readInt16LE(26);
-#
-# 		r.exp = {};
-# 		r.exp.neutralness = d.readInt8(28);
-# 		r.exp.happiness = d.readInt8(29);
-# 		r.exp.surpriseness = d.readInt8(30);
-# 		r.exp.angriness = d.readInt8(31);
-# 		r.exp.sadness = d.readInt8(32);
-# 		r.exp.negaposi = d.readInt8(33);
-#
-# 		r.user = {};
-# 		r.user.id = d.readInt16LE(34);
-# 		r.user.score = d.readInt16LE(36);
-#
-# 		console.log(r);
-#
-# 		result.push(r);
-# 	}
-#
-# 	return result;
-# }
-#
-# HvcP.prototype.parseImage = function(data) {
-# 	var r = {};
-# 	r.width = data.readUInt16LE(0);
-# 	r.height = data.readUInt16LE(2);
-# 	r.data = data.slice(4, data.length);
-# 	return r;
-# }
-#
-# HvcP.prototype.parseExecuteResult = function(data, options) {
-# 	// header
-# 	var bodyNum = data.readUInt8(0);
-# 	var handNum = data.readUInt8(1);
-# 	var faceNum = data.readUInt8(2);
-#
-# 	var idx = 4;
-# 	bodyData = data.slice(idx, idx + 8 * bodyNum);
-#
-# 	idx += bodyData.length
-# 	handData = data.slice(idx, idx + 8 * handNum);
-#
-# 	idx += handData.length
-# 	faceData = data.slice(idx, idx + 38 * faceNum);
-#
-# 	idx += faceData.length;
-#
-# 	result = {};
-# 	result.body = this.parseBodyData(bodyNum, bodyData, options);
-# 	result.hand = this.parseHandData(handNum, handData, options);
-# 	result.face = this.parseFaceData(faceNum, faceData, options);
-# 	if (options.enableImage) {
-# 		imageData = data.slice(idx, idx + 76804);
-# 		result.image = this.parseImage(imageData, options);
-# 	} else if (options.enableImageSmall) {
-# 		imageData = data.slice(idx, idx + 19204);
-# 		result.image = this.parseImage(imageData, options);
-# 	}
-#
-# 	return result;
-# }
-#
-# HvcP.prototype.parseFaceRegisterData = function(data, options) {
-# 	var r = {};
-# 	r.width = data.readUInt16LE(0);
-# 	r.height = data.readUInt16LE(2);
-# 	r.data = data.slice(4);
-# 	return r;
-# }
-#
-# HvcP.prototype.parseReadAlbumResult = function(data) {
-# 	var r = {};
-# 	r.size = data.readUInt32LE(0);
-# 	r.crc = data.readUInt32LE(4);
-# 	r.album = data.slice(8);
-# 	return r;
-# }
-#
-# HvcP.prototype.parseRegisteredData = function(data) {
-# 	var r = {};
-# 	var flag = data.readUInt16LE(0);
-# 	r.flag = [];
-# 	for (var i=0; i<10; ++i) {
-# 		r.flag.push((flag & (1 << i)) > 0);
-# 	}
-# 	console.log(r.flag);
-# 	return r;
-# }
-#
-# HvcP.prototype.detect = function(options, callback) {
-# 	var args = Array.prototype.slice.call(arguments);
-# 	callback = args.pop();
-# 	if (typeof (callback) !== 'function') callback = null;
-# 	options = options || {};
-#
-# 	this.onResponse = function(responseCode, data) {
-# 		console.log("detect: responseCode = " + responseCode);
-# 		result = this.parseExecuteResult(data, options);
-# 		if (callback) {
-# 			callback(null, {
-# 				"responseCode": responseCode,
-# 				"data": result
-# 			});
-# 		}
-# 	};
-#
-# 	var buf = new Buffer(7);
-# 	buf[0] = 0xfe;
-# 	buf[1] = 0x04;
-# 	buf.writeUInt16LE(3, 2); // data length
-# 	buf.writeUInt8(0xfc, 4); // (disable body & hands detection...)
-# 	buf.writeUInt8(0x03, 5); // enable face recognition
-# 	var imageBit = 0x00;
-# 	if (options.enableImage) {
-# 		imageBit = 0x01;
-# 	} else if (options.enableImageSmall) {
-# 		imageBit = 0x02;
-# 	}
-# 	buf.writeUInt8(imageBit, 6);
-#
-# 	this.sendCommand(buf);
-# }
-#
-# HvcP.prototype.registerFace = function(userId, dataId, callback) {
-# 	this.onResponse = function(responseCode, data) {
-# 		console.log("face_register: responseCode = " + responseCode);
-# 		if (responseCode == 1) {
-# 			callback("Error: detected no face to register.");
-# 			return;
-# 		} else if (responseCode == 2) {
-# 			callback("Error: detected more than one face to register.");
-# 			return;
-# 		}
-# 		result = this.parseFaceRegisterData(data);
-# 		if (callback) {
-# 			callback(null, {
-# 				"responseCode": responseCode,
-# 				"data": result
-# 			});
-# 		}
-# 	};
-#
-# 	var buf = new Buffer(7);
-# 	buf[0] = 0xfe;
-# 	buf[1] = 0x10;
-# 	buf.writeUInt16LE(3, 2); // data length
-# 	buf.writeUInt16LE(userId, 4);
-# 	buf.writeUInt8(dataId, 6);
-#
-# 	this.sendCommand(buf);
-# }
-#
-# HvcP.prototype.deleteAllFaces = function(callback) {
-# 	this.onResponse = function(responseCode, data) {
-# 		var error = null;
-# 		console.log("delete_all_faces: responseCode = " + responseCode);
-# 		if (responseCode != 0) {
-# 			error = "Error: unknown error: " + responseCode;
-# 		}
-# 		if (callback) {
-# 			callback(error, {
-# 				"responseCode": responseCode
-# 			});
-# 		}
-# 	};
-#
-# 	this.sendCommand(new Buffer('fe130000', 'hex'));
-# }
-#
-# HvcP.prototype.checkRegisteredData = function(userId, callback) {
-# 	this.onResponse = function(responseCode, data) {
-# 		console.log("face_register: responseCode = " + responseCode);
-# 		if (responseCode == 1) {
-# 			callback("Error: detected no face to register.");
-# 			return;
-# 		} else if (responseCode == 2) {
-# 			callback("Error: detected more than one face to register.");
-# 			return;
-# 		}
-# 		result = this.parseRegisteredData(data);
-# 		if (callback) {
-# 			callback(null, {
-# 				"responseCode": responseCode,
-# 				"data": result
-# 			});
-# 		}
-# 	};
-#
-# 	var buf = new Buffer(6);
-# 	buf[0] = 0xfe;
-# 	buf[1] = 0x15;
-# 	buf.writeUInt16LE(2, 2);
-# 	buf.writeUInt16LE(userId, 4);
-#
-# 	this.sendCommand(buf);
-# }
-#
-# HvcP.prototype.saveFlashRom = function(callback) {
-# 	this.onResponse = function(responseCode, data) {
-# 		var error = null;
-# 		console.log("save_flash_rom: responseCode = " + responseCode);
-# 		if (responseCode != 0) {
-# 			error = "Error: unknown error: " + responseCode;
-# 		}
-# 		if (callback) {
-# 			callback(error, {
-# 				"responseCode": responseCode
-# 			});
-# 		}
-# 	};
-#
-# 	this.sendCommand(new Buffer('fe220000', 'hex'));
-# }
-#
-# HvcP.prototype.readAlbum = function(callback) {
-# 	this.onResponse = function(responseCode, data) {
-# 		var error = null;
-# 		var result = null;
-# 		console.log("raed_album: responseCode = " + responseCode);
-# 		if (responseCode != 0) {
-# 			error = "Error: unknown error: " + responseCode;
-# 		} else {
-# 			result = this.parseReadAlbumResult(data);
-# 		}
-# 		if (callback) {
-# 			callback(error, {
-# 				"responseCode": responseCode,
-# 				"data": result
-# 			});
-# 		}
-# 	};
-#
-# 	this.sendCommand(new Buffer('fe200000', 'hex'));
-# }
-#
-# HvcP.prototype.loadAlbum = function(albumData, crc, callback) {
-# 	this.onResponse = function(responseCode, data) {
-# 		var error = null;
-# 		console.log("load_album: responseCode = " + responseCode);
-# 		if (responseCode != 0) {
-# 			error = "Error: unknown error: " + responseCode;
-# 		}
-# 		if (callback) {
-# 			callback(error, {
-# 				"responseCode": responseCode
-# 			});
-# 		}
-# 	};
-#
-# 	var buf = new Buffer(16);
-# 	buf[0] = 0xfe;
-# 	buf[1] = 0x21;
-# 	buf.writeUInt32LE(4, 2);
-# 	buf.writeUInt32LE(albumData.length + 8, 4);
-# 	buf.writeUInt32LE(albumData.length, 8);
-# 	buf.writeUInt32LE(crc, 12);
-# 	buf = Buffer.concat([buf, albumData])
-#
-# 	this.sendCommand(buf);
-# }
-#
-# module.exports = HvcP;
