@@ -25,10 +25,6 @@ def readUInt32LE(bytes):
     if len(bytes) != 4:
         print "Wrong number of bytes (" + str(len(bytes)) + ") should be 4"
         return None
-    data = int(bytes[:2].encode('hex'), 16)
-    data += (int(bytes[2:].encode('hex'), 16) * 10) # * 10
-
-
     data, = struct.unpack("<I", bytes)
     return data
 
@@ -39,12 +35,27 @@ def readUInt8(bytes):
     data = int(bytes.encode('hex'), 16)
     return data
 
+def readInt8(bytes):
+    if len(bytes) != 1:
+        print "Wrong number of bytes (" + str(len(bytes)) + ") should be 1"
+        return None
+    #data = int(bytes.encode('hex'), 16)
+    data, = struct.unpack("<b", bytes)
+    return data
+
 def readUInt16LE(bytes):
     if len(bytes) != 2:
         print "Wrong number of bytes (" + str(len(bytes)) + ") should be 2"
         return None
     data = int(bytes[:1].encode('hex'), 16)
     data += (int(bytes[1:].encode('hex'), 16) * 10)
+    return data
+
+def readInt16LE(bytes):
+    if len(bytes) != 2:
+        print "Wrong number of bytes (" + str(len(bytes)) + ") should be 2"
+        return None
+    data, = struct.unpack("<h", bytes)
     return data
 
 def writeUInt16LE(data):
@@ -142,7 +153,7 @@ def print_datagram_read(header, data_len, response_code, payload):
     print "<=========================" + ENDC
 
 class HvcP(object):
-    def __init__(self, tty="/dev/ttyUSB0", baudrate=921600, timeout=2):
+    def __init__(self, tty="/dev/ttyUSB0", baudrate=921600, timeout=5):
         print "Connecting to '" + tty + "' at baudrate " + str(baudrate)
         self.ser = serial.Serial(port=tty, baudrate=baudrate, timeout=timeout)
         if self.ser.isOpen():
@@ -303,31 +314,200 @@ class HvcP(object):
             return 270
         return None, None
 
-    def detection_execution(self):
+    def detection_execution(self, eyes_closed=True, gaze=True,
+                            gender=True, age=True, face_orientation=True,
+                            face_detection=True, hand_detection=True,
+                            human_body_detection=True,
+                            facial_expression=True):
         """
         Sets the detection to execute once
         :return:
         """
-        command = 'fe030300'
+        command = '\xfe\x03\x03\x00'
         # 2 bytes: things to run
         # 1 byte: reserved
         # The bytes are configured by bits, byte_config_1:
         # byte 7 6 5 4 3 2 1 0
-        # eye_closed, line_of_sight, sex, age, face_orientation, face_detection, hand_detection, human_body_detection
+        # eye_closed, line_of_sight, gender, age, face_orientation, face_detection, hand_detection, human_body_detection
         # byte_config_2:
         # 0, 0, 0, 0, 0, 0, 0, facial_expression [all 0's but the last]
         # byte_config_3:
         # 0, 0, 0, 0, 0, 0, 0, 0 [Fixed 0's]
+        bitmask_1 = int('00000000', 2)
+        bitmask_2 = int('00000000', 2)
+        bitmask_3 = int('00000000', 2)
+        if eyes_closed:
+            bitmask_1 |= int('10000000', 2)
+        if gaze:
+            bitmask_1 |= int('01000000', 2)
+        if gender:
+            bitmask_1 |= int('00100000', 2)
+        if age:
+            bitmask_1 |= int('00010000', 2)
+        if face_orientation:
+            bitmask_1 |= int('00001000', 2)
+        if face_detection:
+            bitmask_1 |= int('00000100', 2)
+        if hand_detection:
+            bitmask_1 |= int('00000010', 2)
+        if human_body_detection:
+            bitmask_1 |= int('00000001', 2)
 
-        # 04 = face_detection
-        byte_config_1 = '04'
-        byte_config_2 = '00'
-        byte_config_3 = '00'
-        command = command + byte_config_1 + byte_config_2 + byte_config_3
-        self.send_command(command)
+        if facial_expression:
+            bitmask_2 |= int('00000001', 2)
+
+        command = command + chr(bitmask_1) + chr(bitmask_2) + chr(bitmask_3)
+        #command = command + byte_config_1 + byte_config_2 + byte_config_3
+        self.send_command_hex(command)
+        #self.send_command(command)
         response_code, data = self.read_data()
         if data is not None:
             print "detection execution data: " + str(data.encode('hex'))
+
+        # header human_body[0-35], hand detection[0-35], face detection[0-35], reserved [0 fixed]
+        header_offset = 4
+        header = data[:header_offset]
+        body_n = readInt8(header[0])
+        hand_n = readInt8(header[1])
+        face_n = readInt8(header[2])
+        # reserved is useless
+        detection_dict = {}
+        detection_dict["body"] = {"num_detections": body_n}
+        detection_dict["hand"] = {"num_detections": hand_n}
+        detection_dict["face"] = {"num_detections": face_n}
+
+        def get_results(bytes):
+            coord_x = readInt16LE(bytes[0:2])
+            coord_y = readInt16LE(bytes[2:4])
+            detect_size = readInt16LE(bytes[4:6])
+            reliability = readInt16LE(bytes[6:8])
+            result_dict = {"coord_x": coord_x,
+                           "coord_y": coord_y,
+                           "detect_size": detect_size,
+                           "reliability": reliability}
+            return result_dict
+
+
+        for body_idx in range(body_n):
+            # bodies stuff body_n x 8 bytes
+            init_offset = header_offset + body_idx*8
+            end_offset = header_offset + body_idx*8 + 8
+            result_dict = get_results(data[init_offset:end_offset])
+            detection_dict["body"].update(result_dict)
+
+        # hands stuff hand_n x 8 bytes
+        for hand_idx in range(hand_n):
+            # hand stuff hand x 8 bytes
+            init_offset = header_offset + hand_idx*8
+            end_offset = header_offset + hand_idx*8 + 8
+            result_dict = get_results(data[init_offset:end_offset])
+            detection_dict["hand"].update(result_dict)
+
+        # faces stuff face_n x 2~31 bytes
+        for face_idx in range(face_n):
+            # 8 byte Face detection
+            end_offset = header_offset
+            if face_detection:
+                init_offset = header_offset + face_idx*8
+                end_offset = header_offset + face_idx*8 + 8
+                result_dict = get_results(data[init_offset:end_offset])
+                detection_dict["face"].update(result_dict)
+
+            # 8 byte Face direction estimation
+            if face_orientation:
+                init_offset = end_offset
+                end_offset = init_offset + 8
+                detection_dict["face"].update({
+                    "face_orientation": {
+                                    "left_and_right_direction": readInt16LE(data[init_offset:init_offset+2]),
+                                    "vertical_angle": readInt16LE(data[init_offset+2:init_offset+4]),
+                                    "face_inclination_angle": readInt16LE(data[init_offset+4:init_offset+6]),
+                                    "reliability": readInt16LE(data[init_offset+6:end_offset])
+                                    }
+                    })
+
+            # 3 byte Age estimation
+            if age:
+                init_offset = end_offset
+                end_offset = init_offset + 3
+                detection_dict["face"].update({
+                    "age_estimation": {
+                                    "age": readInt8(data[init_offset:init_offset+1]),
+                                    "reliability": readInt16LE(data[init_offset+1:end_offset])
+                                    }
+                    })
+
+            # 3 byte Gender estimation
+            if gender:
+                init_offset = end_offset
+                end_offset = init_offset + 3
+                gender = readInt8(data[init_offset:init_offset+1])
+                if gender == 0:
+                    gender = "woman"
+                elif gender == 1:
+                    gender = "man"
+                detection_dict["face"].update({
+                    "gender_estimation": {
+                                    "gender": gender,
+                                    "reliability": readInt16LE(data[init_offset+1:end_offset])
+                                    }
+                    })
+
+            # 2 byte Gaze estimation
+            if gaze:
+                init_offset = end_offset
+                end_offset = init_offset + 2
+                left_and_right_angle = readInt8(data[init_offset:init_offset+1])
+                up_and_down_angle = readInt8(data[init_offset+1:end_offset])
+                detection_dict["face"].update({
+                    "gaze_estimation": {
+                                    "left_and_right_angle": left_and_right_angle,
+                                    "up_and_down_angle": up_and_down_angle
+                                    }
+                    })
+
+            # 4 byte Eye closed
+            if eyes_closed:
+                init_offset = end_offset
+                end_offset = init_offset + 4
+                eyes_head_left = readInt16LE(data[init_offset:init_offset+2])
+                eyes_head_right = readInt16LE(data[init_offset+2:end_offset])
+                detection_dict["face"].update({
+                    "eyes_estimation": {
+                                    "eyes_head_left": eyes_head_left,
+                                    "eyes_head_right": eyes_head_right
+                                    }
+                    })
+
+            # 3 byte Facial expression estimation
+            if facial_expression:
+                init_offset = end_offset
+                end_offset = init_offset + 3
+                expression = readInt8(data[init_offset:init_offset+1])
+                # 1 = expressionless, 2 = joy, 3 = surprise, 4 = anger, 5 = sadness
+                if expression == 1:
+                    expression_str = "expressionless"
+                elif expression == 2:
+                    expression_str = "joy"
+                elif expression == 3:
+                    expression_str = "surprise"
+                elif expression == 4:
+                    expression_str = "anger"
+                elif expression == 5:
+                    expression_str = "sadness"
+                else:
+                    expression_str = "unknown"
+                top_score = readInt8(data[init_offset+1:init_offset+2])
+                neg_pos_degree = readInt8(data[init_offset+2:end_offset])
+                detection_dict["face"].update({
+                    "facial_expression": {
+                                    "expression": expression_str,
+                                    "top_score": top_score,
+                                    "neg_pos_degree": neg_pos_degree
+                                    }
+                    })
+
+        return detection_dict
 
     def thresholds_read(self):
         """
@@ -410,39 +590,39 @@ class HvcP(object):
 
 if __name__ == '__main__':
     sensor = HvcP()
-    print "Getting version:"
-    print sensor.get_version()
-    print "\n\n"
+    # print "Getting version:"
+    # print sensor.get_version()
+    # print "\n\n"
+    #
+    # deg_to_set_camera = 0
+    # print "Setting camera orientation to " + str(deg_to_set_camera) + " deg"
+    # sensor.set_camera_orientation(deg_to_set_camera)
+    # print "Getting camera orientation, degrees are: " + str(sensor.get_camera_orientation())
+    # deg_to_set_camera = 90
+    # print "Setting camera orientation to " + str(deg_to_set_camera) + " deg"
+    # sensor.set_camera_orientation(deg_to_set_camera)
+    # print "Getting camera orientation, degrees are: " + str(sensor.get_camera_orientation())
+    # deg_to_set_camera = 180
+    # print "Setting camera orientation to " + str(deg_to_set_camera) + " deg"
+    # sensor.set_camera_orientation(deg_to_set_camera)
+    # print "Getting camera orientation, degrees are: " + str(sensor.get_camera_orientation())
+    # deg_to_set_camera = 270
+    # print "Setting camera orientation to " + str(deg_to_set_camera) + " deg"
+    # sensor.set_camera_orientation(deg_to_set_camera)
+    # print "Getting camera orientation, degrees are: " + str(sensor.get_camera_orientation())
+    # print "\n\n"
+    #
+    # print "Reading thresholds settings: " + str(sensor.thresholds_read())
+    # print "\n\n"
+    #
+    # print "Reading detection size settings: " + str(sensor.detection_size_read())
+    # print "\n\n"
+    #
+    # print "Reading face angle settings: " + str(sensor.face_detection_angle_read())
+    # print "\n\n"
 
-    deg_to_set_camera = 0
-    print "Setting camera orientation to " + str(deg_to_set_camera) + " deg"
-    sensor.set_camera_orientation(deg_to_set_camera)
-    print "Getting camera orientation: " + str(sensor.get_camera_orientation())
-    deg_to_set_camera = 90
-    print "Setting camera orientation to " + str(deg_to_set_camera) + " deg"
-    sensor.set_camera_orientation(deg_to_set_camera)
-    print "Getting camera orientation: " + str(sensor.get_camera_orientation())
-    deg_to_set_camera = 180
-    print "Setting camera orientation to " + str(deg_to_set_camera) + " deg"
-    sensor.set_camera_orientation(deg_to_set_camera)
-    print "Getting camera orientation: " + str(sensor.get_camera_orientation())
-    deg_to_set_camera = 270
-    print "Setting camera orientation to " + str(deg_to_set_camera) + " deg"
-    sensor.set_camera_orientation(deg_to_set_camera)
-    print "Getting camera orientation: " + str(sensor.get_camera_orientation())
-    print "\n\n"
-
-    print "Reading thresholds settings: " + str(sensor.thresholds_read())
-    print "\n\n"
-
-    print "Reading detection size settings: " + str(sensor.detection_size_read())
-    print "\n\n"
-
-    print "Reading face angle settings: " + str(sensor.face_detection_angle_read())
-    print "\n\n"
-
-    print "Detection execution: " + str(sensor.detection_execution())
-    print "\n\n"
+    # print "Detection execution: " + str(sensor.detection_execution())
+    # print "\n\n"
 
     print "Testing requests:"
     sensor.test_requests()
