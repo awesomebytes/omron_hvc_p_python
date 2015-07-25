@@ -64,6 +64,23 @@ def writeUInt16LE(data):
 def writeUInt8(data):
     return struct.pack("B", data)[0]
 
+def show_image_opencv(width, height, image):
+    import cv2
+    import numpy as np
+    image_np = np.fromstring(image, dtype='B')
+    print "image_np shape:"
+    print image_np.shape
+    image_reshaped = image_np.reshape(height, width)
+    print "new shape:"
+    print image_reshaped.shape
+    cv2.imwrite("image.jpg", image_reshaped)
+    cv2.imshow("Image:", image_reshaped)
+
+    key = cv2.waitKey(0)
+    if key == 27 or key == 1048603:
+        return
+
+
 
 commands_dict = {'00': "  model / version read ",
                  '01': " set camera orientation",
@@ -136,7 +153,17 @@ def print_datagram_read(header, data_len, response_code, payload):
         return
 
     if payload:
-        p = payload.encode('hex')
+        # Better not spam the screen if the payload is very big
+        if len(payload) > 20:
+            newp = payload[:10]
+            p = newp.encode('hex')
+            p += " ... "
+            newp = payload[-10:]
+            p += newp.encode('hex')
+            p += "   (payload too long)"
+
+        else:
+            p = payload.encode('hex')
         try:
             payload_encoded_unicode = unicode(payload)#payload.encode('unicode')
         except UnicodeDecodeError:
@@ -318,7 +345,10 @@ class HvcP(object):
                             gender=True, age=True, face_orientation=True,
                             face_detection=True, hand_detection=True,
                             human_body_detection=True,
-                            facial_expression=True):
+                            facial_expression=True,
+                            image_bit=False,
+                            image_bit_small=False,
+                            show_image=True):
         """
         Sets the detection to execute once
         :return:
@@ -356,13 +386,18 @@ class HvcP(object):
         if facial_expression:
             bitmask_2 |= int('00000001', 2)
 
+
+        if image_bit:
+            bitmask_3 |= int('00000001', 2)
+        image_bit_small=True
+        if image_bit_small:
+            bitmask_3 |= int('00000010', 2)
+
         command = command + chr(bitmask_1) + chr(bitmask_2) + chr(bitmask_3)
         #command = command + byte_config_1 + byte_config_2 + byte_config_3
         self.send_command_hex(command)
         #self.send_command(command)
         response_code, data = self.read_data()
-        if data is not None:
-            print "detection execution data: " + str(data.encode('hex'))
 
         # header human_body[0-35], hand detection[0-35], face detection[0-35], reserved [0 fixed]
         header_offset = 4
@@ -403,10 +438,10 @@ class HvcP(object):
             result_dict = get_results(data[init_offset:end_offset])
             detection_dict["hand"].update(result_dict)
 
+        end_offset = header_offset
         # faces stuff face_n x 2~31 bytes
         for face_idx in range(face_n):
             # 8 byte Face detection
-            end_offset = header_offset
             if face_detection:
                 init_offset = header_offset + face_idx*8
                 end_offset = header_offset + face_idx*8 + 8
@@ -507,6 +542,25 @@ class HvcP(object):
                                     }
                     })
 
+        if image_bit:
+            # 76800 size (+4 of width and height))
+            width = readUInt16LE(data[end_offset:end_offset+2])
+            height = readUInt16LE(data[end_offset+2:end_offset+4])
+            image = data[end_offset+4:]
+            print "Got a big image of width, height: " + str((width, height))
+            print "With image size: " + str(len(image))
+
+        if image_bit_small:
+            # 19200 size (+4 of width and height)
+            width = readUInt16LE(data[end_offset:end_offset+2])
+            height = readUInt16LE(data[end_offset+2:end_offset+4])
+            image = data[end_offset+4:]
+            print "Got a tiny image of width, height: " + str((width, height))
+            print "With image size: " + str(len(image))
+
+        if show_image and (image_bit or image_bit_small):
+            show_image_opencv(width, height, image)
+
         return detection_dict
 
     def thresholds_read(self):
@@ -572,7 +626,7 @@ class HvcP(object):
         return face_angle_dict
 
 
-    def test_requests(self, num_of_codes_to_try=10):
+    def test_requests(self, num_of_codes_to_try=50):
         for i in range(num_of_codes_to_try):
             i_str_hex_enconded = str(hex(i))[2:4]
             #print "i_str_hex_enconded: " + i_str_hex_enconded
@@ -621,8 +675,8 @@ if __name__ == '__main__':
     # print "Reading face angle settings: " + str(sensor.face_detection_angle_read())
     # print "\n\n"
 
-    # print "Detection execution: " + str(sensor.detection_execution())
-    # print "\n\n"
+    print "Detection execution: " + str(sensor.detection_execution())
+    print "\n\n"
 
-    print "Testing requests:"
-    sensor.test_requests()
+    # print "Testing requests:"
+    # sensor.test_requests()
