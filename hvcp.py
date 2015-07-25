@@ -64,6 +64,12 @@ def writeUInt16LE(data):
 def writeUInt8(data):
     return struct.pack("B", data)[0]
 
+def int_to_hex_le(number):
+    """Given a number as an integer, transform into the string
+    in hex with little endian encoding"""
+    data = struct.pack('<h', number)
+    return data
+
 def show_image_opencv(width, height, image):
     import cv2
     import numpy as np
@@ -290,9 +296,9 @@ class HvcP(object):
         response_code, data = self.read_data()
         version_dict = {}
         version_dict["model"] = data[0:12]
-        version_dict["major_version"] = readUInt8(data[12:13])
-        version_dict["minor_version"] = readUInt8(data[13:14])
-        version_dict["release_version"] = readUInt8(data[14:15])
+        version_dict["major_version"] = readInt8(data[12:13])
+        version_dict["minor_version"] = readInt8(data[13:14])
+        version_dict["release_version"] = readInt8(data[14:15])
         version_dict["revision"] = data[15:19].encode('hex')
         return version_dict
 
@@ -363,6 +369,8 @@ class HvcP(object):
         # 0, 0, 0, 0, 0, 0, 0, facial_expression [all 0's but the last]
         # byte_config_3:
         # 0, 0, 0, 0, 0, 0, 0, 0 [Fixed 0's]
+        #                   |__|    <- the last bits enable getting grayscale image!
+        #        little_image     big_image
         bitmask_1 = int('00000000', 2)
         bitmask_2 = int('00000000', 2)
         bitmask_3 = int('00000000', 2)
@@ -386,10 +394,10 @@ class HvcP(object):
         if facial_expression:
             bitmask_2 |= int('00000001', 2)
 
-
+        image_bit=True
         if image_bit:
             bitmask_3 |= int('00000001', 2)
-        image_bit_small=True
+        #image_bit_small=True
         if image_bit_small:
             bitmask_3 |= int('00000010', 2)
 
@@ -544,16 +552,16 @@ class HvcP(object):
 
         if image_bit:
             # 76800 size (+4 of width and height))
-            width = readUInt16LE(data[end_offset:end_offset+2])
-            height = readUInt16LE(data[end_offset+2:end_offset+4])
+            width = readInt16LE(data[end_offset:end_offset+2])
+            height = readInt16LE(data[end_offset+2:end_offset+4])
             image = data[end_offset+4:]
             print "Got a big image of width, height: " + str((width, height))
             print "With image size: " + str(len(image))
 
         if image_bit_small:
             # 19200 size (+4 of width and height)
-            width = readUInt16LE(data[end_offset:end_offset+2])
-            height = readUInt16LE(data[end_offset+2:end_offset+4])
+            width = readInt16LE(data[end_offset:end_offset+2])
+            height = readInt16LE(data[end_offset+2:end_offset+4])
             image = data[end_offset+4:]
             print "Got a tiny image of width, height: " + str((width, height))
             print "With image size: " + str(len(image))
@@ -572,30 +580,69 @@ class HvcP(object):
         self.send_command('fe060000')
         response_code, data = self.read_data()
         thresholds_dict = {}
-        thresholds_dict["human_body"] = readUInt16LE(data[0:2])
-        thresholds_dict["hand"]       = readUInt16LE(data[2:4])
-        thresholds_dict["face"]       = readUInt16LE(data[4:6])
-        thresholds_dict["reserved"]   = readUInt16LE(data[6:8])
+        thresholds_dict["human_body"] = readInt16LE(data[0:2])
+        thresholds_dict["hand"]       = readInt16LE(data[2:4])
+        thresholds_dict["face"]       = readInt16LE(data[4:6])
+        thresholds_dict["reserved"]   = readInt16LE(data[6:8])
         return thresholds_dict
+
+
+    def thresholds_set(self, human_body, hand, face):
+        """
+        Set the thresholds on detecting bodies, hands and faces. Scale 1-1000, default 500.
+        :param human_body: int
+        :param hand: int
+        :param face: int
+        """
+        command = '\xfe\x05\x08\x00'
+        command += int_to_hex_le(human_body)
+        command += int_to_hex_le(hand)
+        command += int_to_hex_le(face)
+        command += int_to_hex_le(0)
+        self.send_command_hex(command)
+        self.read_data()
 
 
     def detection_size_read(self):
         """
         Get the detection size configurations (max and min): human_body size,
         hand size and face size:
-        {'human_body_min': 30, 'hand_min': 40, 'hand_max': 320, 'face_min': 64, 'face_max': 320, 'human_body_max': 320}
+        {'human_body_min': 30, 'hand_min': 40, 'hand_max': 8192, 'face_min': 64, 'face_max': 8192, 'human_body_max': 8192}
         :return: dict
         """
         self.send_command('fe080000')
         response_code, data = self.read_data()
         detection_size_dict = {}
-        detection_size_dict["human_body_min"] = readUInt16LE(data[0:2])
-        detection_size_dict["human_body_max"] = readUInt16LE(data[2:4])
-        detection_size_dict["hand_min"]       = readUInt16LE(data[4:6])
-        detection_size_dict["hand_max"]       = readUInt16LE(data[6:8])
-        detection_size_dict["face_min"]       = readUInt16LE(data[8:10])
-        detection_size_dict["face_max"]       = readUInt16LE(data[10:12])
+        detection_size_dict["human_body_min"] = readInt16LE(data[0:2])
+        detection_size_dict["human_body_max"] = readInt16LE(data[2:4])
+        detection_size_dict["hand_min"]       = readInt16LE(data[4:6])
+        detection_size_dict["hand_max"]       = readInt16LE(data[6:8])
+        detection_size_dict["face_min"]       = readInt16LE(data[8:10])
+        detection_size_dict["face_max"]       = readInt16LE(data[10:12])
         return detection_size_dict
+
+    def detection_size_set(self, human_body_min, human_body_max,
+                           hand_min, hand_max, face_min, face_max):
+        """
+        Set the detection size settings, range 20-8192, defaults here:S
+        :param human_body_min: int (30)
+        :param human_body_max: int (8192)
+        :param hand_min: int (40)
+        :param hand_max: int (8192)
+        :param face_min: int (64)
+        :param face_max: int (8192)
+        :return:
+        """
+        command = '\xfe\x07\x0c\x00'
+        command += int_to_hex_le(human_body_min)
+        command += int_to_hex_le(human_body_max)
+        command += int_to_hex_le(hand_min)
+        command += int_to_hex_le(hand_max)
+        command += int_to_hex_le(face_min)
+        command += int_to_hex_le(face_max)
+        self.send_command_hex(command)
+        self.read_data()
+
 
     def face_detection_angle_read(self):
         """
@@ -625,6 +672,35 @@ class HvcP(object):
 
         return face_angle_dict
 
+    def face_inclination_angle_set(self, face_direction, face_inclination):
+        """
+        Set the face inclination parameter. Note, seems to ignore face_inclination
+        :param face_direction: str of: "front", "diagonal", "profile"
+        :param face_inclination: str "15", "45"
+        :return:
+        """
+        command = '\xfe\x09\x02\x00'
+        if face_direction == "front":
+            command += int_to_hex_le(0)
+        elif face_direction == "diagonal":
+            command += int_to_hex_le(1)
+        elif face_direction == "profile":
+            command += int_to_hex_le(2)
+        else:
+            print "Error: input for face_inclination_angle_set face_direction can only be 'front', 'diagonal, 'profile''"
+            return
+
+        if face_inclination == "15":
+            command += int_to_hex_le(0)
+        elif face_inclination == "45":
+            command += int_to_hex_le(1)
+        else:
+            print "Error input for face_inclination_angle_set face_inclination can only be '15', '45' (as string)"
+            return
+
+        self.send_command_hex(command)
+        self.read_data()
+
 
     def test_requests(self, num_of_codes_to_try=50):
         for i in range(num_of_codes_to_try):
@@ -644,9 +720,9 @@ class HvcP(object):
 
 if __name__ == '__main__':
     sensor = HvcP()
-    # print "Getting version:"
-    # print sensor.get_version()
-    # print "\n\n"
+    print "Getting version:"
+    print sensor.get_version()
+    print "\n\n"
     #
     # deg_to_set_camera = 0
     # print "Setting camera orientation to " + str(deg_to_set_camera) + " deg"
@@ -665,18 +741,27 @@ if __name__ == '__main__':
     # sensor.set_camera_orientation(deg_to_set_camera)
     # print "Getting camera orientation, degrees are: " + str(sensor.get_camera_orientation())
     # print "\n\n"
+
+    # print "Setting thresholds: "
+    # sensor.thresholds_set(500, 500, 500)
     #
     # print "Reading thresholds settings: " + str(sensor.thresholds_read())
     # print "\n\n"
+
+    # print "Setting detection size:"
+    # sensor.detection_size_set(30, 8192, 40, 8192, 64, 8192)
     #
     # print "Reading detection size settings: " + str(sensor.detection_size_read())
     # print "\n\n"
-    #
-    # print "Reading face angle settings: " + str(sensor.face_detection_angle_read())
-    # print "\n\n"
 
-    print "Detection execution: " + str(sensor.detection_execution())
+    print "Setting face angle:"
+    sensor.face_inclination_angle_set("front", '45')
+
+    print "Reading face angle settings: " + str(sensor.face_detection_angle_read())
     print "\n\n"
+
+    # print "Detection execution: " + str(sensor.detection_execution())
+    # print "\n\n"
 
     # print "Testing requests:"
     # sensor.test_requests()
